@@ -8,8 +8,8 @@ import re
 import threading
 from datetime import datetime, timedelta
 
-# --- ⚠️ التوكين الجديد والآيديهات الخاصة بك ---
-TOKEN = "8019972443:AAHkHWE_7cFrgdYe8iRDCBHm2Doh9_zfPkg" 
+# --- التوكين وإعدادات الآيدي ---
+TOKEN = os.getenv("BOT_TOKEN", "8019972443:AAHkHWE_7cFrgdYe8iRDCBHm2Doh9_zfPkg")
 OWNER_ID = 7253092491       # الآيدي الخاص بك (يوسف)
 MANAGER_ID = 1234567890     # آيدي المدير (عمر)
 
@@ -21,7 +21,6 @@ def init_db():
     conn = sqlite3.connect("barq_bot.db")
     cursor = conn.cursor()
     
-    # 1. جدول المستخدمين
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -35,7 +34,6 @@ def init_db():
         )
     ''')
     
-    # 2. جدول المسوقين والبروموكود
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS promo_codes (
             code TEXT PRIMARY KEY,
@@ -46,7 +44,6 @@ def init_db():
         )
     ''')
     
-    # 3. جدول القنوات للاشتراك الإجباري
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS channels (
             channel_id TEXT PRIMARY KEY,
@@ -54,7 +51,6 @@ def init_db():
         )
     ''')
 
-    # 4. جدول خطط الاشتراكات المدفوعة
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS premium_plans (
             plan_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,19 +61,17 @@ def init_db():
         )
     ''')
 
-    # 5. جدول الأسماء (تم إضافة عداد الاستخدام use_count بحد أقصى 20)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS gmail_names (
             name_id INTEGER PRIMARY KEY AUTOINCREMENT,
             name_text TEXT UNIQUE,
-            status TEXT DEFAULT 'AVAILABLE', -- AVAILABLE, RESERVED, USED
+            status TEXT DEFAULT 'AVAILABLE',
             reserved_by INTEGER DEFAULT NULL,
             reserved_at INTEGER DEFAULT 0,
-            use_count INTEGER DEFAULT 0      -- العداد الجديد (حتى 20)
+            use_count INTEGER DEFAULT 0
         )
     ''')
 
-    # 6. جدول الجيميلات التي تم تسليمها وبانتظار المراجعة
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS submitted_emails (
             email_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,14 +80,13 @@ def init_db():
             email_address TEXT,
             email_password TEXT,
             recovery_email TEXT,
-            status TEXT DEFAULT 'PENDING', -- PENDING, APPROVED, REJECTED
+            status TEXT DEFAULT 'PENDING',
             rejection_reason TEXT DEFAULT NULL,
             price_assigned REAL DEFAULT 0.0,
             submitted_at TEXT
         )
     ''')
 
-    # 7. جدول طلبات السحب
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS withdrawal_requests (
             withdraw_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,12 +94,11 @@ def init_db():
             amount REAL,
             method TEXT,
             details TEXT,
-            status TEXT DEFAULT 'PENDING', -- PENDING, COMPLETED, REJECTED
+            status TEXT DEFAULT 'PENDING',
             requested_at TEXT
         )
     ''')
     
-    # إدراج خطط الاشتراك التلقائية
     cursor.execute("SELECT COUNT(*) FROM premium_plans")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO premium_plans (plan_name, price_egp, duration_days, description) VALUES (?, ?, ?, ?)",
@@ -121,7 +113,6 @@ def init_db():
 
 init_db()
 
-# --- دالة معالجة اتصالات الداتابيز الآمنة ---
 def db_query(query, params=(), fetch=False, commit=False):
     conn = sqlite3.connect("barq_bot.db")
     cursor = conn.cursor()
@@ -139,15 +130,8 @@ def db_query(query, params=(), fetch=False, commit=False):
     finally:
         conn.close()
 
-
-# ==========================================
-#         أنظمة التشغيل في الخلفية (Schedulers)
-# ==========================================
-
+# --- تنظيف حجز الأسماء التلقائي بعد ساعتين ---
 def background_cleanup_tasks():
-    """
-    مهمة دورية تعمل في الخلفية لإلغاء حجز الأسماء التي مر عليها ساعتين دون تسليم.
-    """
     while True:
         try:
             current_time_epoch = int(time.time())
@@ -175,11 +159,10 @@ def background_cleanup_tasks():
         except Exception as e:
             print(f"Error in background scheduler: {e}")
             
-        time.sleep(300) # فحص كل 5 دقائق
+        time.sleep(300)
 
 cleanup_thread = threading.Thread(target=background_cleanup_tasks, daemon=True)
 cleanup_thread.start()
-
 
 # --- التحقق من الاشتراك الإجباري ---
 def is_subscribed(user_id):
@@ -198,8 +181,7 @@ def is_subscribed(user_id):
             continue
     return True
 
-
-# --- كيبورد القوائم الرئيسية التفاعلية ---
+# --- الكيبورد الرئيسي والموحد ---
 def main_keyboard(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row("📥 تسليم جيميلات", "💰 حسابي")
@@ -215,38 +197,27 @@ def main_keyboard(user_id):
         
     markup.row("🤝 كن مسوق بالعمولة", "📞 الدعم الفني")
     
-    if user_id == OWNER_ID:
-        markup.row("👑 لوحة المالك", "💼 لوحة المدير")
-    elif user_id == MANAGER_ID:
-        markup.row("💼 لوحة المدير")
+    # دمج لوحات الإدارة للمالك والمدير لتفادي التشتت
+    if user_id in [OWNER_ID, MANAGER_ID]:
+        markup.row("👑 لوحة التحكم والإدارة")
     return markup
 
-
-def owner_keyboard():
+# --- لوحة تحكم شاملة تجمع كل الخيارات الفعالة ---
+def admin_combined_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("🔑 إضافة بروموكود", callback_data="add_promo"),
-        types.InlineKeyboardButton("📊 إحصائيات المسوقين", callback_data="marketers_stats"),
+        types.InlineKeyboardButton("📥 مراجعة الجيميلات المعلقة", callback_data="review_emails_page_0"),
+        types.InlineKeyboardButton("💸 طلبات السحب المعلقة", callback_data="review_withdraws_page_0"),
+        types.InlineKeyboardButton("➕ إضافة أسماء للجيميلات", callback_data="admin_add_names"),
+        types.InlineKeyboardButton("📊 إحصائيات الأسماء والداتا", callback_data="admin_view_names_status"),
+        types.InlineKeyboardButton("🔑 إضافة بروموكود جديد", callback_data="add_promo"),
+        types.InlineKeyboardButton("📈 إحصائيات المسوقين", callback_data="marketers_stats"),
         types.InlineKeyboardButton("📢 إذاعة ذكية للأعضاء", callback_data="admin_broadcast"),
         types.InlineKeyboardButton("➕ إضافة قناة إجبارية", callback_data="add_channel"),
         types.InlineKeyboardButton("❌ إزالة قناة إجبارية", callback_data="del_channel"),
         types.InlineKeyboardButton("⚙️ تهيئة ونظافة النظام", callback_data="system_reset")
     )
     return markup
-
-
-def manager_keyboard():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("📥 مراجعة الجيميلات", callback_data="review_emails_page_0"),
-        types.InlineKeyboardButton("💸 طلبات السحب", callback_data="review_withdraws_page_0")
-    )
-    markup.add(
-        types.InlineKeyboardButton("➕ إضافة أسماء للجيميلات", callback_data="admin_add_names"),
-        types.InlineKeyboardButton("📋 عرض حالة الأسماء", callback_data="admin_view_names_status")
-    )
-    return markup
-
 
 # --- بداية البوت /start ---
 @bot.message_handler(commands=['start'])
@@ -276,7 +247,6 @@ def start(message):
     else:
         bot.send_message(user_id, f"👋 أهلاً بك مجدداً يا *{message.from_user.first_name}* في بوت برق المتطور! 🚀", reply_markup=main_keyboard(user_id))
 
-
 def process_promo_entry(message):
     user_id = message.from_user.id
     text = message.text.strip() if message.text else ""
@@ -294,11 +264,7 @@ def process_promo_entry(message):
         msg = bot.send_message(user_id, "❌ الرمز الذي أدخلته غير صحيح!\n\nأعد المحاولة بكتابة كود صحيح، أو اكتب **تخطي** للمتابعة.")
         bot.register_next_step_handler(msg, process_promo_entry)
 
-
-# ==========================================
-#      نظام تسليم الجيميلات والتحقق الآمن
-# ==========================================
-
+# --- نظام تسليم الجيميلات ---
 @bot.message_handler(func=lambda message: message.text == "📥 تسليم جيميلات")
 def handle_gmail_submission_flow(message):
     user_id = message.from_user.id
@@ -306,7 +272,6 @@ def handle_gmail_submission_flow(message):
         start(message)
         return
 
-    # جلب أي حجز نشط للمستخدم ولم يصل لـ 20 استخدام بعد
     existing_reservation = db_query(
         "SELECT name_id, name_text FROM gmail_names WHERE reserved_by = ? AND status = 'RESERVED'", 
         (user_id,), fetch=True
@@ -316,7 +281,6 @@ def handle_gmail_submission_flow(message):
         name_id, name_text = existing_reservation[0]
         send_reservation_instructions(user_id, name_id, name_text)
     else:
-        # جلب اسم متاح استخدامه أقل من 20 مرة
         available_name = db_query(
             "SELECT name_id, name_text, use_count FROM gmail_names WHERE status = 'AVAILABLE' AND use_count < 20 LIMIT 1", 
             fetch=True
@@ -331,16 +295,13 @@ def handle_gmail_submission_flow(message):
         name_id, name_text, use_count = available_name[0]
         current_time_epoch = int(time.time())
         
-        # حجز الاسم مؤقتًا للمستخدم الحالي
         db_query(
             "UPDATE gmail_names SET status = 'RESERVED', reserved_by = ?, reserved_at = ? WHERE name_id = ?",
             (user_id, current_time_epoch, name_id), commit=True
         )
         send_reservation_instructions(user_id, name_id, name_text)
 
-
 def send_reservation_instructions(user_id, name_id, name_text):
-    # جلب عدد مرات الاستخدام المتبقية لتوضيحها للمستخدم
     use_data = db_query("SELECT use_count FROM gmail_names WHERE name_id = ?", (name_id,), fetch=True)
     count = use_data[0][0] if use_data else 0
     remains = 20 - count
@@ -362,7 +323,6 @@ def send_reservation_instructions(user_id, name_id, name_text):
     markup.add(types.InlineKeyboardButton("❌ إلغاء حجز هذا الاسم", callback_data=f"cancel_reserve_{name_id}"))
     msg = bot.send_message(user_id, text, reply_markup=markup)
     bot.register_next_step_handler(msg, process_submitted_gmail, name_id, name_text)
-
 
 def process_submitted_gmail(message, name_id, name_text):
     user_id = message.from_user.id
@@ -397,12 +357,11 @@ def process_submitted_gmail(message, name_id, name_text):
         (user_id, name_id, email_address, email_password, recovery_email, submitted_at), commit=True
     )
 
-    # تحويل حالة الاسم إلى USED مرحليًا لحين المراجعة من المدير لعدم حدوث تضارب
     db_query("UPDATE gmail_names SET status = 'USED' WHERE name_id = ?", (name_id,), commit=True)
 
     bot.send_message(
         user_id, 
-        "✅ **تم استلام الجيميل بنجاح وجاري إرساله للمدير للفحص والمراجعة!**\n"
+        "✅ **تم استلام الجيميل بنجاح وجاري إرساله للإدارة للفحص والمراجعة!**\n"
         "سيتم إشعارك فوراً بالنتيجة المالية فور القبول.",
         reply_markup=main_keyboard(user_id)
     )
@@ -419,11 +378,7 @@ def process_submitted_gmail(message, name_id, name_text):
         except Exception:
             pass
 
-
-# ==========================================
-#             الأزرار التفاعلية Callbacks
-# ==========================================
-
+# --- الأزرار التفاعلية Callbacks ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
     user_id = call.from_user.id
@@ -569,9 +524,9 @@ def handle_callbacks(call):
         used = db_query("SELECT COUNT(*) FROM gmail_names WHERE status = 'USED'", fetch=True)[0][0]
         text = (
             "📋 **حالة الأسماء في قاعدة البيانات:**\n\n"
-            f"🟢 الأسماء المتاحة للحجز (استخدام أقل من 20): **{avail}**\n"
+            f"🟢 الأسماء المتاحة للحجز: **{avail}**\n"
             f"🟡 الأسماء المحجوزة حالياً: **{res}**\n"
-            f"🔴 أسماء تم استخدامها وبانتظار الفحص: **{used}**"
+            f"🔴 أسماء مستخدمة بانتظار الفحص: **{used}**"
         )
         bot.send_message(user_id, text)
 
@@ -592,10 +547,7 @@ def handle_callbacks(call):
         bot.delete_message(call.message.chat.id, call.message.message_id)
 
 
-# ==========================================
-#     نظام الـ Pagination لصفحات الإدارة
-# ==========================================
-
+# --- مراجعة الحسابات المعلقة ---
 def show_review_emails_page(admin_id, message_id, page=0):
     limit = 1
     offset = page * limit
@@ -647,6 +599,7 @@ def show_review_emails_page(admin_id, message_id, page=0):
         pass
 
 
+# --- مراجعة طلبات السحب المعلقة ---
 def show_review_withdraws_page(admin_id, message_id, page=0):
     limit = 1
     offset = page * limit
@@ -694,10 +647,7 @@ def show_review_withdraws_page(admin_id, message_id, page=0):
         pass
 
 
-# ==========================================
-#     قبول ورفض الجيميلات وطلبات السحب
-# ==========================================
-
+# --- تأكيد قبول الجيميل ومضاعفة حد الاسم ---
 def manager_approve_gmail_step(message, gmail_id, original_msg_id):
     if message.from_user.id not in [OWNER_ID, MANAGER_ID]: return
     try:
@@ -717,25 +667,20 @@ def manager_approve_gmail_step(message, gmail_id, original_msg_id):
 
     user_id, name_id, email_address = gmail_data[0]
 
-    # تحديث حالة الجيميل إلى مقبول وتحديد السعر
     db_query("UPDATE submitted_emails SET status = 'APPROVED', price_assigned = ? WHERE email_id = ?", (price, gmail_id), commit=True)
     db_query("UPDATE users SET balance = balance + ? WHERE user_id = ?", (price, user_id), commit=True)
     
-    # 🌟 المنطق الجديد والمطور للتحكم بتكرار الأسماء حتى 20 مرة 🌟
     name_info = db_query("SELECT use_count FROM gmail_names WHERE name_id = ?", (name_id,), fetch=True)
     if name_info:
         current_uses = name_info[0][0] + 1
         if current_uses >= 20:
-            # إذا وصل لـ 20 استخدام يتم حذف الاسم نهائيًا من الداتابيز
             db_query("DELETE FROM gmail_names WHERE name_id = ?", (name_id,), commit=True)
         else:
-            # إذا لم يصل، تتم زيادة عدد مرات الاستخدام وإرجاعه متاحاً للآخرين وإزالة الحجز الحالي
             db_query(
                 "UPDATE gmail_names SET use_count = ?, status = 'AVAILABLE', reserved_by = NULL, reserved_at = 0 WHERE name_id = ?",
                 (current_uses, name_id), commit=True
             )
 
-    # توزيع عمولة المسوق إن وجدت
     apply_referral_commission_on_approval(user_id)
 
     try:
@@ -767,8 +712,6 @@ def manager_reject_gmail_step(message, gmail_id, original_msg_id):
     user_id, name_id, email_address = gmail_data[0]
 
     db_query("UPDATE submitted_emails SET status = 'REJECTED', rejection_reason = ? WHERE email_id = ?", (reason, gmail_id), commit=True)
-    
-    # في حالة الرفض، نعيد الاسم ليكون متاحاً (AVAILABLE) مع تصفير الحجز دون زيادة العداد
     db_query("UPDATE gmail_names SET status = 'AVAILABLE', reserved_by = NULL, reserved_at = 0 WHERE name_id = ?", (name_id,), commit=True)
 
     try:
@@ -814,10 +757,7 @@ def manager_reject_withdraw_step(message, w_id, original_msg_id):
     show_review_withdraws_page(message.from_user.id, original_msg_id, 0)
 
 
-# ==========================================
-#          نظام الترقيات (Premium)
-# ==========================================
-
+# --- نظام الاشتراكات المدفوعة ---
 def buy_plan_manual(user_id, plan_id, message):
     plan_data = db_query("SELECT plan_name, price_egp, duration_days FROM premium_plans WHERE plan_id = ?", (plan_id,), fetch=True)
     if not plan_data: return
@@ -838,14 +778,12 @@ def buy_plan_manual(user_id, plan_id, message):
         reply_markup=markup
     )
 
-
 def apply_premium_upgrade(user_id, plan_id, message):
     plan_data = db_query("SELECT plan_name, duration_days FROM premium_plans WHERE plan_id = ?", (plan_id,), fetch=True)
     if not plan_data: return
     plan_name, duration = plan_data[0]
     
     expiry_date = (datetime.now() + timedelta(days=duration)).strftime('%Y-%m-%d %H:%M:%S')
-    
     db_query("UPDATE users SET is_premium = 1, premium_expiry = ? WHERE user_id = ?", (expiry_date, user_id), commit=True)
     
     bot.edit_message_text(
@@ -855,11 +793,7 @@ def apply_premium_upgrade(user_id, plan_id, message):
         message.message_id
     )
 
-
-# ==========================================
-#          تسيير شؤون المالك والمدراء
-# ==========================================
-
+# --- أنظمة وإجراءات الإدارة والمشرفين ---
 def admin_process_add_channel(message):
     user_id = message.from_user.id
     if user_id != OWNER_ID: return
@@ -873,7 +807,6 @@ def admin_process_add_channel(message):
     
     db_query("INSERT OR REPLACE INTO channels (channel_id, channel_username) VALUES (?, ?)", (ch_id, ch_user), commit=True)
     bot.send_message(user_id, f"✅ تم حفظ القناة {ch_user} كقناة اشتراك إجباري.")
-
 
 def admin_process_add_names(message):
     user_id = message.from_user.id
@@ -901,7 +834,6 @@ def admin_process_add_names(message):
         f"🟡 الأسماء المكررة: **{duplicate}**"
     )
 
-
 def admin_process_broadcast(message):
     if message.from_user.id != OWNER_ID: return
     broadcast_text = message.text.strip() if message.text else ""
@@ -927,17 +859,11 @@ def admin_process_broadcast(message):
     threading.Thread(target=run_smart_broadcast, args=(broadcast_text,), daemon=True).start()
     bot.send_message(OWNER_ID, "🚀 بدأ الإرسال الذكي بالخلفية...")
 
-
-# ==========================================
-#          أنظمة المسوقين والعمولات
-# ==========================================
-
 def admin_get_promo_name(message):
     if message.from_user.id != OWNER_ID: return
     promo_name = message.text.strip()
     msg = bot.send_message(OWNER_ID, f"كم عمولة المسوق المخصصة لهذا الكود `{promo_name}`؟ (مثال: `1.50`):")
     bot.register_next_step_handler(msg, admin_get_promo_commission, promo_name)
-
 
 def admin_get_promo_commission(message, promo_name):
     try:
@@ -947,7 +873,6 @@ def admin_get_promo_commission(message, promo_name):
     except ValueError:
         msg = bot.send_message(OWNER_ID, "⚠️ خطأ! أدخل رقماً صحيحاً للعمولة:")
         bot.register_next_step_handler(msg, admin_get_promo_commission, promo_name)
-
 
 def admin_get_promo_marketer(message, promo_name, commission):
     try:
@@ -960,7 +885,6 @@ def admin_get_promo_marketer(message, promo_name, commission):
     except ValueError:
         msg = bot.send_message(OWNER_ID, "⚠️ خطأ! الآيدي يجب أن يكون عبارة عن رقم فقط:")
         bot.register_next_step_handler(msg, admin_get_promo_marketer, promo_name, commission)
-
 
 def apply_referral_commission_on_approval(user_id):
     user_info = db_query("SELECT referred_by FROM users WHERE user_id = ?", (user_id,), fetch=True)
@@ -981,11 +905,7 @@ def apply_referral_commission_on_approval(user_id):
     except Exception:
         pass
 
-
-# ==========================================
-#          معالجة النصوص العامة والتحكم
-# ==========================================
-
+# --- معالجة الضغط على الخيارات من الكيبورد السفلي ---
 @bot.message_handler(func=lambda message: True)
 def handle_menu_options(message):
     user_id = message.from_user.id
@@ -1031,12 +951,9 @@ def handle_menu_options(message):
         markup.add(types.InlineKeyboardButton("💳 سحب أرباحي الآن", callback_data="request_withdraw"))
         bot.send_message(user_id, f"👤 **معلومات حسابك المالية:**\n\n💵 رصيدك الحالي: **{balance:.2f} ج.م**\n⭐ نوع الحساب: {status_text}", reply_markup=markup)
         
-    elif text == "👑 لوحة المالك" and user_id == OWNER_ID:
-        bot.send_message(user_id, "👑 أهلاً بك يا يوسف في لوحة المالك الحصرية:", reply_markup=owner_keyboard())
-        
-    elif text == "💼 لوحة المدير" and (user_id == MANAGER_ID or user_id == OWNER_ID):
-        bot.send_message(user_id, "💼 لوحة تحكم المدير لإدارة الحسابات وطلبات العمل:", reply_markup=manager_keyboard())
-
+    elif text == "👑 لوحة التحكم والإدارة" and user_id in [OWNER_ID, MANAGER_ID]:
+        # إظهار اللوحة الشاملة والمدمجة فوراً لليوزر المالك أو المدير
+        bot.send_message(user_id, "👑 👋 أهلاً بك يا يوسف في لوحة التحكم الكاملة والمدمجة لإدارة البوت:", reply_markup=admin_combined_keyboard())
 
 def save_withdraw_request(message, method_name):
     user_id = message.from_user.id
@@ -1079,8 +996,7 @@ def save_withdraw_request(message, method_name):
         except Exception:
             pass
 
-
-# --- تشغيل البوت مع ميزة الحماية من الانقطاع المفاجئ ---
+# --- تشغيل البوت وحماية البولينج ---
 if __name__ == '__main__':
     print("⚡ البوت يعمل بنجاح وبانتظار استقبال التحديثات بالتوكين الجديد...")
     while True:
