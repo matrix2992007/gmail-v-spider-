@@ -2,10 +2,8 @@ import telebot
 from telebot import types
 import sqlite3
 import os
-import time
-import re
-import threading
-from datetime import datetime, timedelta
+import random
+from datetime import datetime
 
 # --- التوكين وإعدادات الآيدي ---
 TOKEN = os.getenv("BOT_TOKEN", "8019972443:AAHkHWE_7cFrgdYe8iRDCBHm2Doh9_zfPkg")
@@ -27,13 +25,22 @@ def init_db():
             balance REAL DEFAULT 0.0,
             referred_by TEXT DEFAULT NULL,
             has_entered_promo INTEGER DEFAULT 0,
-            is_premium INTEGER DEFAULT 0,
-            premium_expiry TEXT DEFAULT NULL,
-            joined_date TEXT
+            joined_date TEXT,
+            assigned_name TEXT DEFAULT NULL,  -- الاسم المخصص للمستخدم حالياً للعمل عليه
+            has_submitted_assigned INTEGER DEFAULT 0 -- هل قام بتسليم الاسم المخصص له؟
         )
     ''')
     
-    # جدول البروموكود (تمت إضافة حقل اسم المسوق المعين يدوياً marketer_name)
+    # جدول الأسماء المضافة من الآدمن
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS allowed_names (
+            name_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name_text TEXT UNIQUE,
+            used_count INTEGER DEFAULT 0
+        )
+    ''')
+    
+    # جدول البروموكود
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS promo_codes (
             code TEXT PRIMARY KEY,
@@ -59,6 +66,7 @@ def init_db():
             email_id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             email_address TEXT,
+            password TEXT,
             status TEXT DEFAULT 'PENDING',
             submitted_at TEXT
         )
@@ -87,16 +95,19 @@ def init_db():
     
     # قيم افتراضية للإعدادات
     cursor.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('global_password', 'Barq1234')")
-    cursor.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('gmail_format', 'الاسم المطلوب رقمين @gmail.com')")
+    cursor.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('gmail_format', 'الاسم المطلوب 4 ارقام @gmail.com')")
     cursor.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('point_price', '2.5')")
-    # الجملة الخاصة بفتح لوحة المسوق (الافتراضية)
     cursor.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('marketer_secret_phrase', 'افتح لوحة المسوق')")
 
-    # تحديث تلقائي لقاعدة البيانات لإضافة عمود اسم المسوق في حال لم يكن موجوداً
-    try:
-        cursor.execute("ALTER TABLE promo_codes ADD COLUMN marketer_name TEXT DEFAULT NULL")
-    except sqlite3.OperationalError:
-        pass  # العمود موجود بالفعل
+    # تحديثات الجداول الحالية لضمان مطابقتها للهيكل الجديد
+    try: cursor.execute("ALTER TABLE users ADD COLUMN assigned_name TEXT DEFAULT NULL")
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE users ADD COLUMN has_submitted_assigned INTEGER DEFAULT 0")
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE submitted_emails ADD COLUMN password TEXT")
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE promo_codes ADD COLUMN marketer_name TEXT DEFAULT NULL")
+    except sqlite3.OperationalError: pass
 
     conn.commit()
     conn.close()
@@ -125,7 +136,7 @@ def get_setting(key):
     res = db_query("SELECT value FROM system_settings WHERE key = ?", (key,), fetch=True)
     return res[0][0] if res else ""
 
-# --- التحقق من الاشتراك الإجبارى ---
+# التحقق من الاشتراك الإجباري
 def is_subscribed(user_id):
     if user_id in [OWNER_ID, MANAGER_ID]:
         return True
@@ -144,8 +155,8 @@ def is_subscribed(user_id):
 # --- الكيبورد الرئيسي للمستخدم ---
 def main_keyboard(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("📥 تسليم جيميلات", "💰 حسابي")
-    markup.row("➕ إضافة بروموكود")
+    markup.row("📧 الجيميلات المتاحة", "📥 تسليم جيميل")
+    markup.row("💰 حسابي", "➕ إضافة بروموكود")
     markup.row("🤝 كن مسوق بالعمولة", "📞 الدعم الفني")
     if user_id in [OWNER_ID, MANAGER_ID]:
         markup.row("👑 لوحة التحكم والإدارة")
@@ -157,13 +168,14 @@ def admin_combined_keyboard():
     markup.add(
         types.InlineKeyboardButton("📥 مراجعة الجيميلات المعلقة", callback_data="review_emails_page_0"),
         types.InlineKeyboardButton("💸 طلبات السحب المعلقة", callback_data="review_withdraws_page_0"),
+        types.InlineKeyboardButton("➕ إضافة أسماء جيميلات", callback_data="admin_add_names"),
+        types.InlineKeyboardButton("📉 خصم نقاط يدوي (بـ ID)", callback_data="admin_deduct_points"),
         types.InlineKeyboardButton("🔑 تعيين كلمة سر موحدة", callback_data="set_global_pass"),
         types.InlineKeyboardButton("📝 تعيين صيغة الجيميل", callback_data="set_gmail_format"),
         types.InlineKeyboardButton("💵 تحديد سعر النقاط/الحساب", callback_data="set_point_price"),
         types.InlineKeyboardButton("✍️ تعيين جملة لوحة المسوق", callback_data="set_secret_phrase"),
         types.InlineKeyboardButton("👤 تعيين اسم للمسوق (يدوي)", callback_data="set_marketer_name"),
         types.InlineKeyboardButton("🔑 إضافة بروموكود جديد", callback_data="add_promo"),
-        types.InlineKeyboardButton("📈 إحصائيات المسوقين عمومی", callback_data="marketers_stats"),
         types.InlineKeyboardButton("📢 إذاعة ذكية للأعضاء", callback_data="admin_broadcast"),
         types.InlineKeyboardButton("➕ إضافة قناة إجبارية", callback_data="add_channel"),
         types.InlineKeyboardButton("❌ إزالة قناة إجبارية", callback_data="del_channel")
@@ -196,42 +208,116 @@ def start(message):
         f"🔑 كلمة السر الموحدة المطلوبة: `{get_setting('global_password')}`\n"
         f"📝 صيغة الجيميل المطلوب: `{get_setting('gmail_format')}`\n"
         f"💵 سعر الحساب المقبول: **{get_setting('point_price')} ج.م**\n\n"
-        "🟢 إستعمل القائمة بالأسفل لبدء العمل وسحب الأرباح!"
+        "🟢 اضغط على زر **«📧 الجيميلات المتاحة»** بالأسفل للحصول على الاسم المخصص لك للعمل!"
     )
     bot.send_message(user_id, welcome_text, reply_markup=main_keyboard(user_id))
 
-# --- نظام تسليم الجيميلات ---
-@bot.message_handler(func=lambda message: message.text == "📥 تسليم جيميلات")
+# --- قسم اختيار الجيميلات والأسماء للمستخدم ---
+@bot.message_handler(func=lambda message: message.text == "📧 الجيميلات المتاحة")
+def handle_gmail_names_section(message):
+    user_id = message.from_user.id
+    if not is_subscribed(user_id): return
+
+    # التحقق هل المستخدم محجوز له اسم بالفعل ولم يسلمه؟
+    user_data = db_query("SELECT assigned_name, has_submitted_assigned FROM users WHERE user_id = ?", (user_id,), fetch=True)
+    
+    if user_data and user_data[0][0] and user_data[0][1] == 0:
+        # المستخدم محجوز له اسم ولم يسلمه بعد
+        assigned_name = user_data[0][0]
+        bot.send_message(
+            user_id,
+            f"⚠️ **لديك اسم محجوز حالياً للعمل عليه!**\n\n"
+            f"👤 الاسم المطلوب: `{assigned_name}`\n\n"
+            f"📝 **الصيغة المطلوبة للتسليم:**\n"
+            f"`{assigned_name}xxxx@gmail.com` (استبدل xxxx بـ 4 أرقام عشوائية من اختيارك)\n"
+            f"🔑 كلمة السر الموحدة: `{get_setting('global_password')}`\n\n"
+            f"❌ **يرجى تسليم الجيميل للأكمال والحصول على اسم جديد!**"
+        )
+        return
+
+    # جلب اسم عشوائي متوفر من قاعدة البيانات
+    available_names = db_query("SELECT name_text FROM allowed_names ORDER BY used_count ASC, RANDOM() LIMIT 1", fetch=True)
+    
+    if not available_names:
+        bot.send_message(user_id, "⚠️ لا توجد أسماء متاحة حالياً في البوت، يرجى مراجعة الدعم الفني أو المحاولة لاحقاً.")
+        return
+
+    selected_name = available_names[0][0]
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("💾 حفظ الاسم للعمل", callback_data=f"save_name_{selected_name}"))
+    
+    bot.send_message(
+        user_id,
+        f"💡 **الاسم المقترح لك للعمل عليه:**\n\n"
+        f"🏷️ الاسم: **{selected_name}**\n\n"
+        f"اضغط على الزر بالأسفل لحجز وحفظ الاسم للبدء في إنشاء الجيميل بالصيغة المطلوبة.",
+        reply_markup=markup
+    )
+
+# --- نظام تسليم الجيميلات (email | password) ---
+@bot.message_handler(func=lambda message: message.text == "📥 تسليم جيميل")
 def handle_gmail_submission_flow(message):
     user_id = message.from_user.id
     if not is_subscribed(user_id): return
-    
+
+    user_data = db_query("SELECT assigned_name, has_submitted_assigned FROM users WHERE user_id = ?", (user_id,), fetch=True)
+    if not user_data or not user_data[0][0]:
+        bot.send_message(user_id, "❌ يجب عليك أولاً حجز اسم للعمل عليه من قسم **«📧 الجيميلات المتاحة»**.")
+        return
+
     text = (
-        "📥 **قسم تسليم الحسابات:**\n\n"
-        f"📝 الصيغة المطلوبة: `{get_setting('gmail_format')}`\n"
-        f"🔑 كلمة السر الموحدة التي يجب إنشاؤها: `{get_setting('global_password')}`\n\n"
-        "✍️ أرسل الحساب الآن مباشرة (البريد فقط):"
+        "📥 **قسم تسليم الحسابات المعتمد:**\n\n"
+        f"👤 الاسم المحجوز لك: `{user_data[0][0]}`\n"
+        f"🔑 كلمة السر الموحدة: `{get_setting('global_password')}`\n\n"
+        f"✍️ يرجى إرسال الحساب والباسورد بالتنسيق التالي حصراً:\n"
+        f"`البريد الإلكتروني | كلمة السر`"
     )
     msg = bot.send_message(user_id, text)
     bot.register_next_step_handler(msg, process_submitted_gmail)
 
 def process_submitted_gmail(message):
     user_id = message.from_user.id
-    email_address = message.text.strip() if message.text else ""
+    raw_text = message.text.strip() if message.text else ""
 
-    if not email_address or "@" not in email_address:
-        bot.send_message(user_id, "❌ يرجى إرسال بريد إلكتروني صحيح.")
+    if " | " not in raw_text and "|" not in raw_text:
+        bot.send_message(user_id, "❌ صيغة الإرسال غير صحيحة! يرجى الإرسال بالتنسيق التالي:\n`الايميل | كلمة السر`")
         return
 
-    submitted_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    db_query("INSERT INTO submitted_emails (user_id, email_address, submitted_at) VALUES (?, ?, ?)",
-             (user_id, email_address, submitted_at), commit=True)
+    parts = raw_text.split("|")
+    email_address = parts[0].strip()
+    password = parts[1].strip()
 
-    bot.send_message(user_id, "✅ تم استلام الجيميل وبانتظار مراجعة الإدارة.")
+    if "@gmail.com" not in email_address.lower():
+        bot.send_message(user_id, "❌ يجب أن يكون البريد المرسل بريد جيميل ينتهي بـ @gmail.com")
+        return
+
+    # تحديث حالة المستخدم بأنه قام بالتسليم للاسم المحجوز
+    db_query("UPDATE users SET has_submitted_assigned = 1 WHERE user_id = ?", (user_id,), commit=True)
+
+    submitted_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    db_query("INSERT INTO submitted_emails (user_id, email_address, password, submitted_at) VALUES (?, ?, ?, ?)",
+             (user_id, email_address, password, submitted_at), commit=True)
+
+    bot.send_message(user_id, "✅ تم استلام الجيميل بنجاح وبانتظار مراجعة الإدارة وفحص الحساب.\n\n💡 يمكنك الآن العودة لقسم **«📧 الجيميلات المتاحة»** للحصول على اسم جديد والبدء من جديد!")
     
-    # إشعار الإدارة
+    # إرسال إشعار فوري للإدارة مع أزرار سهلة للنسخ والتفعيل
     for m_id in [MANAGER_ID, OWNER_ID]:
-        try: bot.send_message(m_id, f"📥 **جيميل جديد للمراجعة:**\n👤 مرسل: `{user_id}`\n📧 البريد: `{email_address}`")
+        try:
+            markup = types.InlineKeyboardMarkup()
+            # سنقوم بعرض هذا الحساب للمراجعة الفورية
+            markup.add(
+                types.InlineKeyboardButton("📥 الانتقال لصفحة المراجعة", callback_data="review_emails_page_0")
+            )
+            bot.send_message(
+                m_id, 
+                f"📥 **وصلنا حساب جديد للفحص:**\n\n"
+                f"👤 المستخدم: `{user_id}`\n"
+                f"📧 الحساب: `{email_address}`\n"
+                f"🔑 الباسورد: `{password}`\n\n"
+                f"🔗 للتجربة والنسخ السريع:\n`{email_address} | {password}`",
+                reply_markup=markup
+            )
         except: pass
 
 # --- أزرار التفاعل Callbacks ---
@@ -245,6 +331,24 @@ def handle_callbacks(call):
             start(call.message)
         else:
             bot.answer_callback_query(call.id, "❌ لم تشترك في كافة القنوات بعد!", show_alert=True)
+
+    elif call.data.startswith("save_name_"):
+        name_to_save = call.data.replace("save_name_", "")
+        
+        # حفظ الاسم للمستخدم في قاعدة البيانات وتعيين حالة عدم التسليم
+        db_query("UPDATE users SET assigned_name = ?, has_submitted_assigned = 0 WHERE user_id = ?", (name_to_save, user_id), commit=True)
+        db_query("UPDATE allowed_names SET used_count = used_count + 1 WHERE name_text = ?", (name_to_save,), commit=True)
+        
+        text_response = (
+            f"✅ **تم حفظ وحجز الاسم بنجاح!**\n\n"
+            f"👤 الاسم المخصص لك: `{name_to_save}`\n\n"
+            f"📝 **الصيغة المطلوبة للتسليم:**\n"
+            f"قم بإنشاء جيميل يبدأ بالاسم المخصص متبوعاً بـ 4 أرقام عشوائية:\n"
+            f"`{name_to_save}xxxx@gmail.com` (مثال: `{name_to_save}4829@gmail.com`)\n\n"
+            f"🔑 كلمة السر الموحدة: `{get_setting('global_password')}`\n\n"
+            f"👉 بعد إنشائه وتجهيزه، اضغط على زر **«📥 تسليم جيميل»** بالأسفل وقم بتسليمه."
+        )
+        bot.edit_message_text(text_response, call.message.chat.id, call.message.message_id)
 
     elif call.data.startswith("review_emails_page_"):
         if user_id not in [OWNER_ID, MANAGER_ID]: return
@@ -262,19 +366,37 @@ def handle_callbacks(call):
             db_query("UPDATE submitted_emails SET status = 'APPROVED' WHERE email_id = ?", (email_id,), commit=True)
             db_query("UPDATE users SET balance = balance + ? WHERE user_id = ?", (price, u_id), commit=True)
             apply_referral_commission_on_approval(u_id)
-            try: bot.send_message(u_id, f"🎉 تم قبول حسابك `{email}` وإضافة {price} ج.م لرصيدك!")
+            try: bot.send_message(u_id, f"🎉 تم قبول حسابك `{email}` وتأكيد عمله بنجاح! تم إضافة {price} ج.م لرصيدك.")
             except: pass
-        bot.answer_callback_query(call.id, "✅ تم القبول بنجاح")
+        bot.answer_callback_query(call.id, "✅ تم قبول الحساب وإضافة النقاط")
         show_review_emails_page(user_id, call.message.message_id, 0)
 
     elif call.data.startswith("reject_email_"):
         if user_id not in [OWNER_ID, MANAGER_ID]: return
         email_id = int(call.data.replace("reject_email_", ""))
-        db_query("UPDATE submitted_emails SET status = 'REJECTED' WHERE email_id = ?", (email_id,), commit=True)
-        bot.answer_callback_query(call.id, "❌ تم الرفض")
+        
+        email_data = db_query("SELECT user_id, email_address FROM submitted_emails WHERE email_id = ?", (email_id,), fetch=True)
+        if email_data:
+            u_id, email = email_data[0]
+            db_query("UPDATE submitted_emails SET status = 'REJECTED' WHERE email_id = ?", (email_id,), commit=True)
+            # إعادة تعيين إمكانية سحب اسم جديد لأن حسابه تم رفضه ولم يتم تفعيله
+            db_query("UPDATE users SET has_submitted_assigned = 1 WHERE user_id = ?", (u_id,), commit=True)
+            try: bot.send_message(u_id, f"❌ تم رفض الحساب المرسل `{email}` لأنه غير شغال أو كلمة السر خاطئة. يرجى المحاولة بحساب آخر شغال.")
+            except: pass
+            
+        bot.answer_callback_query(call.id, "❌ تم رفض الحساب بنجاح")
         show_review_emails_page(user_id, call.message.message_id, 0)
 
-    # --- لوحة إعدادات المشرفين ---
+    # --- إدارة الأسماء والخصومات اليدوية للآدمن ---
+    elif call.data == "admin_add_names" and user_id in [OWNER_ID, MANAGER_ID]:
+        msg = bot.send_message(user_id, "✍️ أرسل الآن الأسماء التي تريد إضافتها للبوت.\n💡 (يمكنك إرسال كل اسم في سطر منفصل لإضافة مجموعة أسماء دفعة واحدة):")
+        bot.register_next_step_handler(msg, process_admin_adding_names)
+
+    elif call.data == "admin_deduct_points" and user_id in [OWNER_ID, MANAGER_ID]:
+        msg = bot.send_message(user_id, "📉 أرسل تفاصيل الخصم بالتنسيق التالي:\n`الآيدي الخاص بالعضو - عدد النقاط/الجنيهات المراد خصمها`\n\nمثال: `7253092491 - 5`")
+        bot.register_next_step_handler(msg, process_admin_deduct_points)
+
+    # --- إعدادات المشرفين العامة ---
     elif call.data == "set_global_pass" and user_id in [OWNER_ID, MANAGER_ID]:
         msg = bot.send_message(user_id, "🔑 أرسل كلمة السر الموحدة الجديدة:")
         bot.register_next_step_handler(msg, lambda m: update_setting(m, 'global_password', "تم تحديث كلمة السر الموحدة!"))
@@ -288,15 +410,14 @@ def handle_callbacks(call):
         bot.register_next_step_handler(msg, lambda m: update_setting(m, 'point_price', "تم تحديث السعر بنجاح!"))
 
     elif call.data == "set_secret_phrase" and user_id in [OWNER_ID, MANAGER_ID]:
-        msg = bot.send_message(user_id, "✍️ أرسل الجملة السرية الجديدة التي تفتح لوحة المسوق (مثال: `اللوحة السرية`):")
-        bot.register_next_step_handler(msg, lambda m: update_setting(m, 'marketer_secret_phrase', "تم تحديث الجملة السرية لفتح لوحة المسوق بنجاح!"))
+        msg = bot.send_message(user_id, "✍️ أرسل الجملة السرية الجديدة التي تفتح لوحة المسوق:")
+        bot.register_next_step_handler(msg, lambda m: update_setting(m, 'marketer_secret_phrase', "تم تحديث الجملة السرية بنجاح!"))
 
-    # --- ميزة تعيين اسم المسوق يدوياً من الآدمن ---
     elif call.data == "set_marketer_name" and user_id in [OWNER_ID, MANAGER_ID]:
         msg = bot.send_message(user_id, "✍️ أرسل أولاً **آيدي المسوق** (الرقم التعريفي له) لتعيين اسم له:")
         bot.register_next_step_handler(msg, admin_get_marketer_id_for_name)
 
-    # --- معالجة طلبات السحب المتعددة ---
+    # --- معالجة طلبات السحب ---
     elif call.data == "request_withdraw":
         user_balance = db_query("SELECT balance FROM users WHERE user_id = ?", (user_id,), fetch=True)
         balance = user_balance[0][0] if user_balance else 0.0
@@ -312,7 +433,6 @@ def handle_callbacks(call):
             markup.add(types.InlineKeyboardButton("🎮 سحب شدات ببجي PUBG (فوق 50 ج.م)", callback_data="w_pubg"))
             
         markup.add(types.InlineKeyboardButton("🪙 سحب بايننس Binance", callback_data="w_binance_root"))
-        
         bot.edit_message_text(f"📋 **خيارات السحب المتاحة لرصيدك ({balance:.2f} ج.م):**", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
     elif call.data == "w_cash":
@@ -363,13 +483,64 @@ def handle_callbacks(call):
         msg = bot.send_message(OWNER_ID, "✍️ أرسل اسم كود البروموكود الجديد:")
         bot.register_next_step_handler(msg, admin_get_promo_name)
 
+# --- معالجة إضافة الأسماء من الآدمن ---
+def process_admin_adding_names(message):
+    if message.from_user.id not in [OWNER_ID, MANAGER_ID]: return
+    names_input = message.text.strip() if message.text else ""
+    if not names_input:
+        bot.send_message(message.from_user.id, "❌ لم يتم إرسال أي أسماء.")
+        return
+        
+    names_list = [name.strip() for name in names_input.split("\n") if name.strip()]
+    added_count = 0
+    
+    for name in names_list:
+        try:
+            db_query("INSERT OR IGNORE INTO allowed_names (name_text) VALUES (?)", (name,), commit=True)
+            added_count += 1
+        except Exception as e:
+            print(f"Error adding name: {e}")
+            
+    bot.send_message(message.from_user.id, f"✅ تم إضافة `{added_count}` اسم بنجاح في قاعدة البيانات للعمل عليها!")
+
+# --- معالجة خصم النقاط اليدوي بـ ID ---
+def process_admin_deduct_points(message):
+    if message.from_user.id not in [OWNER_ID, MANAGER_ID]: return
+    input_text = message.text.strip() if message.text else ""
+    
+    if "-" not in input_text:
+        bot.send_message(message.from_user.id, "❌ التنسيق غير صحيح! يرجى الإرسال كالتالي:\n`الآيدي - عدد النقاط`")
+        return
+        
+    try:
+        parts = input_text.split("-")
+        target_id = int(parts[0].strip())
+        points_to_deduct = float(parts[1].strip())
+        
+        # التحقق من وجود العضو
+        user_exists = db_query("SELECT balance FROM users WHERE user_id = ?", (target_id,), fetch=True)
+        if not user_exists:
+            bot.send_message(message.from_user.id, "❌ لم يتم العثور على مستخدم بهذا الآيدي في قاعدة البيانات.")
+            return
+            
+        new_balance = max(0.0, user_exists[0][0] - points_to_deduct)
+        db_query("UPDATE users SET balance = ? WHERE user_id = ?", (new_balance, target_id), commit=True)
+        
+        bot.send_message(message.from_user.id, f"✅ تم خصم `{points_to_deduct}` جنيه/نقطة من العضو `{target_id}` بنجاح!\n💰 الرصيد الجديد له: **{new_balance:.2f} ج.م**")
+        
+        try: bot.send_message(target_id, f"⚠️ تم خصم `{points_to_deduct}` ج.م من رصيدك بواسطة الإدارة (بسبب تغيير كلمة سر أحد الجيميلات المستلمة أو مشاكل بها).\n💰 رصيدك الحالي: **{new_balance:.2f} ج.م**")
+        except: pass
+        
+    except ValueError:
+        bot.send_message(message.from_user.id, "❌ يرجى التأكد من كتابة الأرقام بشكل صحيح.")
+
 def update_setting(message, key, success_msg):
     if message.from_user.id not in [OWNER_ID, MANAGER_ID]: return
     val = message.text.strip()
     db_query("INSERT OR REPLACE INTO system_settings (key, value) VALUES (?, ?)", (key, val), commit=True)
     bot.send_message(message.from_user.id, f"✅ {success_msg}")
 
-# --- خطوات تعيين اسم المسوق يدوياً ---
+# --- تعيين اسم المسوق ---
 def admin_get_marketer_id_for_name(message):
     if message.from_user.id not in [OWNER_ID, MANAGER_ID]: return
     m_id_str = message.text.strip()
@@ -378,7 +549,6 @@ def admin_get_marketer_id_for_name(message):
         return
     
     m_id = int(m_id_str)
-    # التحقق من وجوده كمسوق في قاعدة البيانات أولاً
     promo = db_query("SELECT code FROM promo_codes WHERE marketer_id = ?", (m_id,), fetch=True)
     if not promo:
         bot.send_message(message.from_user.id, f"⚠️ لا يوجد كود بروموكود مسجل لهذا الآيدي `{m_id}` في البوت!")
@@ -424,22 +594,30 @@ def process_withdraw_save(message, method):
              
     bot.send_message(user_id, f"✅ تم تقديم طلب السحب الخاص بك ({method}) بنجاح للمراجعة الإدارية.")
 
-# --- لوحة مراجعة الجيميلات ---
+# --- لوحة مراجعة الجيميلات من الآدمن ---
 def show_review_emails_page(admin_id, message_id, page=0):
-    pending = db_query("SELECT email_id, user_id, email_address, submitted_at FROM submitted_emails WHERE status = 'PENDING' LIMIT 1 OFFSET ?", (page,), fetch=True)
+    pending = db_query("SELECT email_id, user_id, email_address, password, submitted_at FROM submitted_emails WHERE status = 'PENDING' LIMIT 1 OFFSET ?", (page,), fetch=True)
     total = db_query("SELECT COUNT(*) FROM submitted_emails WHERE status = 'PENDING'", fetch=True)[0][0]
     
     if not pending:
         bot.edit_message_text("📥 لا توجد حسابات معلقة حالياً.", admin_id, message_id)
         return
         
-    email_id, u_id, email, s_time = pending[0]
-    text = f"📥 **مراجعة حساب (صفحة {page+1} من {total}):**\n\n👤 مرسل: `{u_id}`\n📧 البريد: `{email}`\n📅 الوقت: `{s_time}`"
+    email_id, u_id, email, password, s_time = pending[0]
+    
+    text = (
+        f"📥 **مراجعة حساب (صفحة {page+1} من {total}):**\n\n"
+        f"👤 مرسل: `{u_id}`\n"
+        f"📧 البريد: `{email}`\n"
+        f"🔑 الباسورد: `{password}`\n"
+        f"📅 الوقت: `{s_time}`\n\n"
+        f"📋 للنسخ السريع:\n`{email} | {password}`"
+    )
     
     markup = types.InlineKeyboardMarkup()
     markup.add(
-        types.InlineKeyboardButton("✅ قبول", callback_data=f"approve_email_{email_id}"),
-        types.InlineKeyboardButton("❌ رفض", callback_data=f"reject_email_{email_id}")
+        types.InlineKeyboardButton("✅ قبول (تم التجربة)", callback_data=f"approve_email_{email_id}"),
+        types.InlineKeyboardButton("❌ رفض الحساب", callback_data=f"reject_email_{email_id}")
     )
     bot.edit_message_text(text, admin_id, message_id, reply_markup=markup)
 
@@ -459,7 +637,7 @@ def show_review_withdraws_page(admin_id, message_id, page=0):
     markup.add(types.InlineKeyboardButton("✅ تم التحويل بنجاح", callback_data=f"complete_w_{w_id}"))
     bot.edit_message_text(text, admin_id, message_id, reply_markup=markup)
 
-# --- معالجة جميع الرسائل النصية الواردة والتحقق من الجملة السرية واسم المسوق ---
+# --- معالجة جميع الرسائل النصية ---
 @bot.message_handler(func=lambda message: True)
 def handle_text_messages(message):
     user_id = message.from_user.id
@@ -469,20 +647,18 @@ def handle_text_messages(message):
 
     secret_phrase = get_setting('marketer_secret_phrase')
 
-    # الخطوة الأولى: إرسال الجملة السرية في الشات
+    # الدخول للوحة المسوقين بالخطوات
     if text == secret_phrase:
-        # التحقق إذا كان مسوقاً مسجلاً في النظام أم لا
         promo_data = db_query("SELECT code, marketer_name FROM promo_codes WHERE marketer_id = ?", (user_id,), fetch=True)
         if not promo_data:
             bot.send_message(user_id, "⚠️ عذراً، أنت لست مسجلاً كمسوق بالعمولة لدينا لتتمكن من فتح اللوحة.")
             return
             
-        # طلب إدخال اسم صاحب البروموكود المخصص له من الإدارة
         msg = bot.send_message(user_id, "🔐 **الجملة السرية صحيحة!**\n\n✍️ يرجى كتابة **اسم صاحب البروموكود** لتأكيد هويتك وفتح اللوحة:")
         bot.register_next_step_handler(msg, verify_marketer_name_step, promo_data[0][0], promo_data[0][1])
         return
 
-    # باقي الأزرار والقوائم التقليدية
+    # الأزرار البسيطة
     if text == "➕ إضافة بروموكود":
         count_approved = db_query("SELECT COUNT(*) FROM submitted_emails WHERE user_id = ? AND status = 'APPROVED'", (user_id,), fetch=True)[0][0]
         
@@ -513,17 +689,15 @@ def handle_text_messages(message):
     elif text == "👑 لوحة التحكم والإدارة" and user_id in [OWNER_ID, MANAGER_ID]:
         bot.send_message(user_id, "👑 أهلاً بك في لوحة الإدارة المحدثة:", reply_markup=admin_combined_keyboard())
 
-# الخطوة الثانية: التحقق من اسم المسوق المكتوب
+# تأكيد اسم المسوق المكتوب
 def verify_marketer_name_step(message, promo_code, registered_name):
     user_id = message.from_user.id
     input_name = message.text.strip()
     
-    # التحقق من تطابق الاسم المدخل مع الاسم المسجل (تجاهل الفروقات البسيطة في المسافات)
     if not registered_name or input_name.lower() != registered_name.lower():
         bot.send_message(user_id, "❌ الاسم غير صحيح! لا يمكن فتح لوحة المسوق.")
         return
 
-    # إذا تطابق الاسم تماماً، تفتح لوحة المسوق الخاص به
     referred_users = db_query("SELECT user_id, username, balance FROM users WHERE referred_by = ?", (promo_code,), fetch=True)
     
     panel_text = (
@@ -560,7 +734,6 @@ def admin_get_promo_name(message):
 
 def save_promo_db(message, p_name):
     m_id = int(message.text.strip())
-    # حفظ الكود مع إعطاء اسم مبدئي "غير محدد" للمسوق لكي يقوم الأدمن بتعيينه لاحقاً بشكل كامل
     db_query("INSERT INTO promo_codes (code, marketer_id, commission, marketer_name) VALUES (?, ?, 1.0, 'غير محدد')", (p_name, m_id), commit=True)
     bot.send_message(OWNER_ID, f"✅ تم تفعيل الكود `{p_name}` للمسوق `{m_id}`.\n💡 يرجى استخدام زر تعيين اسم المسوق الآن لتعيين اسمه اليدوي.")
 
