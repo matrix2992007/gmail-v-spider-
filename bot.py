@@ -9,7 +9,7 @@ import threading
 from datetime import datetime, timedelta
 
 # --- ⚠️ التوكين الجديد والآيديهات الخاصة بك ---
-TOKEN = "8019972443:AAEdX0hTj5GyiW7Pti38YT3sgiMLqbdYfWg" 
+TOKEN = "8019972443:AAHkHWE_7cFrgdYe8iRDCBHm2Doh9_zfPkg" 
 OWNER_ID = 7253092491       # الآيدي الخاص بك (يوسف)
 MANAGER_ID = 1234567890     # آيدي المدير (عمر)
 
